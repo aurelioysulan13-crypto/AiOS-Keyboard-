@@ -1,10 +1,11 @@
 
-name: Build AyOS Keyboard v3.1.65 APK
+name: Build AyOS Keyboard APK
 
 on:
   push:
     paths:
-      - 'AyOS-Keyboard-repo-root-v3.1.65.zip'
+      - '*.zip'
+      - '**/*.zip'
       - '.github/workflows/build-from-zip.yml'
   workflow_dispatch:
 
@@ -16,11 +17,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository with full Git history
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -30,68 +33,104 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Verify source ZIP
+      - name: Detect most recently uploaded ZIP
+        id: source
         shell: bash
         run: |
-          ZIP_FILE="AyOS-Keyboard-repo-root-v3.1.65.zip"
+          mapfile -t ZIP_FILES < <(
+            find . -maxdepth 1 -type f -iname '*.zip' -print | sort
+          )
 
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "::error::Required source ZIP not found: $ZIP_FILE"
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "::error::No ZIP files were found in the repository root."
             exit 1
           fi
 
-          if ! unzip -t "$ZIP_FILE" >/dev/null; then
-            echo "::error::The source ZIP is invalid or corrupted."
+          LATEST_ZIP=""
+          LATEST_TIMESTAMP=-1
+
+          echo "ZIP files found:"
+          printf ' - %s\n' "${ZIP_FILES[@]}"
+
+          for ZIP_FILE in "${ZIP_FILES[@]}"; do
+            TIMESTAMP="$(git log -1 --format='%ct' -- "$ZIP_FILE")"
+
+            if [ -z "$TIMESTAMP" ]; then
+              echo "::warning::Could not determine Git upload time for $ZIP_FILE"
+              continue
+            fi
+
+            echo "Checking: $ZIP_FILE (Git timestamp: $TIMESTAMP)"
+
+            if [ "$TIMESTAMP" -gt "$LATEST_TIMESTAMP" ]; then
+              LATEST_TIMESTAMP="$TIMESTAMP"
+              LATEST_ZIP="$ZIP_FILE"
+            fi
+          done
+
+          if [ -z "$LATEST_ZIP" ]; then
+            echo "::error::Could not determine the latest ZIP file."
             exit 1
           fi
 
-          echo "Source ZIP verified: $ZIP_FILE"
+          if ! unzip -t "$LATEST_ZIP" >/dev/null; then
+            echo "::error::The newest ZIP is invalid or corrupted: $LATEST_ZIP"
+            exit 1
+          fi
+
+          echo "zip_file=$LATEST_ZIP" >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+          echo "SELECTED SOURCE ZIP: $LATEST_ZIP"
+          echo "======================================"
 
       - name: Extract and validate Android project
         id: extract
         shell: bash
+        env:
+          ZIP_FILE: ${{ steps.source.outputs.zip_file }}
         run: |
-          ZIP_FILE="AyOS-Keyboard-repo-root-v3.1.65.zip"
           EXTRACT_DIR="$RUNNER_TEMP/aios-keyboard-source"
 
           mkdir -p "$EXTRACT_DIR"
           unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
 
-          PROJECT_SETTINGS="$(find "$EXTRACT_DIR" \
-            -type f -name settings.gradle -print -quit)"
+          mapfile -t SETTINGS_FILES < <(
+            find "$EXTRACT_DIR" \
+              -type f \
+              -name settings.gradle \
+              -not -path '*/build/*'
+          )
 
-          if [ -z "$PROJECT_SETTINGS" ]; then
-            echo "::error::Could not locate settings.gradle in the extracted ZIP."
+          if [ "${#SETTINGS_FILES[@]}" -eq 0 ]; then
+            echo "::error::Could not locate settings.gradle in the selected ZIP."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$PROJECT_SETTINGS")"
+          if [ "${#SETTINGS_FILES[@]}" -gt 1 ]; then
+            echo "::error::Multiple Android project roots were found in the ZIP."
+            printf '%s\n' "${SETTINGS_FILES[@]}"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "${SETTINGS_FILES[0]}")"
 
           for REQUIRED_FILE in \
             "$PROJECT_DIR/build.gradle" \
             "$PROJECT_DIR/app/build.gradle" \
             "$PROJECT_DIR/app/src/main/AndroidManifest.xml" \
             "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"; do
+
             if [ ! -f "$REQUIRED_FILE" ]; then
-              echo "::error::Required Android project file is missing: $REQUIRED_FILE"
+              echo "::error::Required project file is missing: $REQUIRED_FILE"
               exit 1
             fi
           done
 
-          if ! grep -Eq 'versionName[[:space:]]+"3\.1\.65"' \
-            "$PROJECT_DIR/app/build.gradle"; then
-            echo "::error::The extracted project does not declare versionName 3.1.65."
-            exit 1
-          fi
-
-          if ! grep -Eq 'versionCode[[:space:]]+149([[:space:]]|$)' \
-            "$PROJECT_DIR/app/build.gradle"; then
-            echo "::error::The extracted project does not declare versionCode 149."
-            exit 1
-          fi
-
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "AyOS Keyboard v3.1.65 project validated."
+
+          echo "Selected ZIP: $ZIP_FILE"
+          echo "Android project validated."
           echo "Project directory: $PROJECT_DIR"
 
       - name: Build debug APK
@@ -109,17 +148,17 @@ jobs:
           APK_PATH="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -s "$APK_PATH" ]; then
-            echo "::error::APK generation failed. Output file is missing or empty."
+            echo "::error::APK generation failed. APK file is missing or empty."
             exit 1
           fi
 
-          echo "AyOS Keyboard v3.1.65 APK successfully generated."
+          echo "APK successfully generated:"
           ls -lh "$APK_PATH"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AyOS-Keyboard-v3.1.65-APK
+          name: AyOS-Keyboard-APK
           path: ${{ steps.extract.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
